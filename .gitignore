@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+build/Release/
+*.dmg
+*.exe
+*.zip
+*.blockmap
+
+# Local secrets / env (never commit credentials)
+.env
+.env.local
+*.pem
+
+# Large media / demo assets (don't bloat the repo)
+*.mov
+*.mp4
+*.m4a
+*.aiff
+
+# OS / editor cruft
+.DS_Store
+.ipynb_checkpoints/
+*.log
+npm-debug.log*
+
+# Anything that looks like exported credentials
+*client_secret*.json
+*credentials*.json

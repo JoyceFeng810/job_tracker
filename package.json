@@ -1,0 +1,51 @@
+{
+  "name": "job-tracker",
+  "version": "1.0.0",
+  "description": "AI-powered job search tracker — auto-scans Gmail, tracks applications, preps skills",
+  "main": "src/main/main.js",
+  "engines": {
+    "node": ">=20 <21"
+  },
+  "scripts": {
+    "start": "electron .",
+    "predev": "node -e \"if(parseInt(process.versions.node) !== 20) { console.error('\\n❌ Wrong Node version: ' + process.version + '\\nRun: nvm use 20\\n'); process.exit(1); }\"",
+    "dev": "NODE_ENV=development electron .",
+    "setup": "npm install && npx electron-rebuild && echo '✅ Ready — run: npx electron .'",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "electron-store": "^8.2.0",
+    "googleapis": "^140.0.0",
+    "keytar": "^7.9.0",
+    "mammoth": "^1.12.0",
+    "node-fetch": "^2.7.0",
+    "pdf-parse": "^1.1.1"
+  },
+  "devDependencies": {
+    "electron": "^29.1.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.yourname.jobtracker",
+    "productName": "Job Tracker",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "assets/",
+        "to": "assets/"
+      }
+    ]
+  }
+}
