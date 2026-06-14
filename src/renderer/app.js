@@ -756,6 +756,13 @@ function mergeScanFields(existing, f) {
   const out = { ...existing, ...f };
   const sticky = ['applied_date', 'screening_date', 'interview_date', 'final_date',
                   'offer_date', 'interview_time', 'interview_datetime'];
+  // Locked entry (user set the schedule manually): the scan must not change its
+  // dates, time, or status at all — only fill in notes if newly found.
+  if (existing.event_locked) {
+    for (const k of [...sticky, 'status']) out[k] = existing[k] ?? null;
+    out.event_locked = 1;
+    return out;
+  }
   for (const k of sticky) {
     if (f[k] == null || f[k] === '') out[k] = existing[k] ?? null;
   }
@@ -800,8 +807,8 @@ async function scanGmail() {
       //       recruiters, e.g. "Greetings from Google!" whose body says
       //       "Thanks so much for applying for …")
       const q1 = `after:${dateStr} subject:(application OR applied OR applying OR interview OR offer OR rejected OR "thank you for")`;
-      const q2 = `after:${dateStr} from:(greenhouse-mail.io OR greenhouse.io OR lever.co OR workday.com OR smartrecruiters.com OR ashbyhq.com OR taleo.net OR jobvite.com OR icims.com OR myworkdayjobs.com OR recruiting OR recruiter OR careers)`;
-      const q3 = `after:${dateStr} ("thank you for applying" OR "thanks for applying" OR "applying for" OR "your application" OR "application for the" OR "formally apply" OR "phone screen" OR "recruiting coordinator" OR "moving forward" OR "schedule a call" OR "schedule an interview" OR "next steps in" OR subject:(invitation OR "updated invitation" OR interview) OR "added to your calendar" OR "google meet")`;
+      const q2 = `after:${dateStr} from:(greenhouse-mail.io OR greenhouse.io OR lever.co OR workday.com OR smartrecruiters.com OR ashbyhq.com OR taleo.net OR jobvite.com OR icims.com OR myworkdayjobs.com OR calendar-notification@google.com OR recruiting OR recruiter OR careers)`;
+      const q3 = `after:${dateStr} ("thank you for applying" OR "thanks for applying" OR "applying for" OR "your application" OR "application for the" OR "formally apply" OR "phone screen" OR "recruiting coordinator" OR "moving forward" OR "schedule a call" OR "schedule an interview" OR "next steps in" OR "added to your calendar" OR "google meet" OR subject:(invitation OR "updated invitation" OR "event confirmed" OR accepted OR rsvp OR interview))`;
 
       const [r1, r2, r3] = await Promise.all([
         window.electronAPI.gmail.search(q1, 20),
@@ -827,6 +834,16 @@ async function scanGmail() {
       const allMsgs = [...(r1.messages || []), ...(r2.messages || []), ...(r3.messages || [])].filter(m => {
         if (seen.has(m.id)) return false; seen.add(m.id); return true;
       });
+
+      // Group emails from the same sender domain together so a calendar invite and
+      // its recruiter thread land in the SAME AI batch (lets the AI correlate them).
+      const domainOf = m => {
+        const at = (m.from || '').toLowerCase().match(/@([a-z0-9.-]+)/);
+        let d = at ? at[1].replace(/>.*/, '') : 'zzz';
+        if (d.includes('google')) d = 'google.com';  // calendar-notification@google + recruiter@google → same bucket
+        return d;
+      };
+      allMsgs.sort((a, b) => domainOf(a).localeCompare(domainOf(b)));
 
       fetchedMsgs = allMsgs;
       rawCount = allMsgs.length;
@@ -871,14 +888,16 @@ RULES:
    - ALSO output interview_datetime as a full ISO-8601 timestamp WITH the timezone offset for the meeting start (e.g. "2026-06-15T09:30:00-05:00" for 9:30am CDT). This is required whenever a specific time is known.
    - Company comes from the organizer's email domain (ashleyobrien@google.com → Google).
    - CORRELATE BY PERSON: if the invite's organizer/attendee name matches a recruiter discussing a SPECIFIC role in another email (e.g. Ashley Ciaburri about "Threat Investigations Manager"), this meeting belongs to THAT application — output ONE record using that company + role, with the meeting's date/time. Do NOT create a separate "(role not specified)" / "Meeting with [name]" record when it can be linked this way.
+8. DATE SEMANTICS — CRITICAL. The email's Date header is when the MESSAGE was sent, NOT a meeting date. Use it only for applied_date and updated_date. NEVER copy the email's received date into screening_date or interview_date. Those two fields hold ONLY an actual scheduled meeting date that is explicitly stated in the email (a calendar invite, or wording like "let's meet on Monday Jun 15"). If no specific meeting time is scheduled, leave screening_date AND interview_date null — even when status is "screening". Likewise interview_time / interview_datetime are null unless a real meeting time is given.
 
 Return ONLY a raw JSON array, no markdown, no prose:
 [{"id":"company_role_slug","company":"Company Name","role":"Exact Role Title","status":"applied|screening|interview|offer|rejected","applied_date":"YYYY-MM-DD or null","screening_date":"YYYY-MM-DD or null","interview_date":"YYYY-MM-DD or null","interview_time":"e.g. 7:30 AM PST or null","interview_datetime":"ISO-8601 with offset e.g. 2026-06-15T09:30:00-05:00, or null","offer_date":"YYYY-MM-DD or null","updated_date":"YYYY-MM-DD","notes":"one sentence"}]
 
 Today is ${today}. Dates come from the email Date header. Use null for unknown dates.`;
 
-    // Process in batches of 8 so the AI response never exceeds token limits
-    const BATCH = 8;
+    // Process in batches so the AI response never exceeds token limits. Domain-
+    // sorted above, so each batch tends to hold one company's emails together.
+    const BATCH = 10;
     const allEmails = isElectron ? fetchedMsgs : emailData.split('\n\n');
     const found = [];
     const seenKey = new Set();
@@ -894,8 +913,8 @@ Today is ${today}. Dates come from the email Date header. Use null for unknown d
 
       let parsed = '';
       try {
-        // 1200 tokens is enough for 8 emails (≈150 tokens per record)
-        parsed = await callAI(sysprompt, `Extract all job applications from these emails:\n\n${batch}`, 1200);
+        // ~160 tokens per record; give headroom for a batch of 10
+        parsed = await callAI(sysprompt, `Extract all job applications from these emails:\n\n${batch}`, 1800);
         console.log(`[scan] batch ${i / BATCH + 1} response:`, parsed);
       } catch (e) {
         console.error(`[scan] batch ${i / BATCH + 1} AI call failed:`, e.message);
@@ -1265,6 +1284,7 @@ async function saveEdit() {
     app.interview_time = null;
   }
   app.updated_date = new Date().toISOString().split('T')[0];
+  app.event_locked = 1;  // user-confirmed — protect from future scans
 
   await DB.saveApp(app);
   $('edit-form').style.display = 'none';
@@ -1504,6 +1524,7 @@ async function addManual() {
     [dateField]: dateVal,
     interview_time,
     interview_datetime,
+    event_locked: 1,   // manual entry — protect from future scans
     updated_date: new Date().toISOString().split('T')[0],
     skills: [],
   };

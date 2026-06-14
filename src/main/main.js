@@ -79,6 +79,11 @@ function initDB(db) {
     // in any timezone. interview_time is kept as a human-readable label/fallback.
     db.exec("ALTER TABLE applications ADD COLUMN interview_datetime TEXT");
   }
+  if (!cols.includes('event_locked')) {
+    // 1 = the user manually set this entry's schedule; Gmail scans must never
+    // overwrite its dates, time, or status.
+    db.exec("ALTER TABLE applications ADD COLUMN event_locked INTEGER DEFAULT 0");
+  }
 }
 
 // ─── Window ───────────────────────────────────────────────────────────────────
@@ -201,21 +206,22 @@ ipcMain.handle('db:apps:upsert', (_, app) => {
   const row = {
     applied_date: null, screening_date: null, interview_date: null,
     final_date: null, offer_date: null, updated_date: null, notes: null,
-    interview_time: null, interview_datetime: null,
+    interview_time: null, interview_datetime: null, event_locked: 0,
     ...app,
-    skills: JSON.stringify(app.skills || [])
+    skills: JSON.stringify(app.skills || []),
+    event_locked: app.event_locked ? 1 : 0
   };
   db.prepare(`
     INSERT INTO applications (id, company, role, status, applied_date, screening_date,
-      interview_date, final_date, offer_date, updated_date, notes, skills, interview_time, interview_datetime)
+      interview_date, final_date, offer_date, updated_date, notes, skills, interview_time, interview_datetime, event_locked)
     VALUES (@id, @company, @role, @status, @applied_date, @screening_date,
-      @interview_date, @final_date, @offer_date, @updated_date, @notes, @skills, @interview_time, @interview_datetime)
+      @interview_date, @final_date, @offer_date, @updated_date, @notes, @skills, @interview_time, @interview_datetime, @event_locked)
     ON CONFLICT(id) DO UPDATE SET
       status=excluded.status, screening_date=excluded.screening_date,
       interview_date=excluded.interview_date, final_date=excluded.final_date,
       offer_date=excluded.offer_date, updated_date=excluded.updated_date,
       notes=excluded.notes, skills=excluded.skills, interview_time=excluded.interview_time,
-      interview_datetime=excluded.interview_datetime
+      interview_datetime=excluded.interview_datetime, event_locked=excluded.event_locked
   `).run(row);
   return true;
 });
