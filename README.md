@@ -6,6 +6,26 @@ A **local-first** desktop app (macOS) that turns your messy job-search inbox int
 
 ---
 
+## ⬇️ Download (Apple Silicon Mac)
+
+**[👉 Download the latest release](https://github.com/JoyceFeng810/job_tracker/releases/latest)** — grab the `.dmg`, then:
+
+1. Open the `.dmg` and drag **Job Tracker** to Applications.
+2. First launch: the app is unsigned, so **right-click it → Open → Open** (only needed once) to get past macOS Gatekeeper.
+3. Follow the in-app setup (Steps 1–3 below): connect Gmail, add your AI key.
+
+> 💡 Currently **Apple Silicon (M-series) only**. Intel Macs and Windows can build from source — see the "Install & run from source" section below.
+
+**Verify your download is authentic (optional but recommended).** Every release is built by this repo's CI with a cryptographic [build-provenance attestation](https://github.com/JoyceFeng810/job_tracker/attestations). Confirm your dmg wasn't tampered with — replace the filename with the one you downloaded:
+
+```bash
+gh attestation verify "Job Tracker-<version>-arm64.dmg" --repo JoyceFeng810/job_tracker
+```
+
+Or compare its SHA-256 to the `.sha256` file attached to the release.
+
+---
+
 ## ✨ Features
 
 - **Auto-scan Gmail** → builds your pipeline (applied / screening / interview / offer / rejected)
