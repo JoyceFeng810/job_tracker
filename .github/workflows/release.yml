@@ -1,15 +1,16 @@
-# Builds the installers in CI on every version tag and publishes a tamper-evident
-# GitHub Release: each artifact gets a SHA-256 checksum AND a cryptographic
-# build-provenance attestation (Sigstore). Anyone can then verify a download was
-# built from THIS repo by THIS workflow — a swapped/malicious dmg won't verify:
+# Builds the macOS app in CI on every version tag and publishes a tamper-evident
+# GitHub Release: the dmg gets a SHA-256 checksum AND a cryptographic Sigstore
+# build-provenance attestation. Anyone can verify a download was built from THIS
+# repo by THIS workflow — a swapped/malicious dmg won't verify:
 #
-#   gh attestation verify "Job Tracker-1.0.0-arm64.dmg" --repo JoyceFeng810/job_tracker
+#   gh attestation verify "Job Tracker-1.0.2-arm64.dmg" --repo JoyceFeng810/job_tracker
 #
-# Trigger:  git tag v1.0.0 && git push origin v1.0.0
+# Trigger:  git tag v1.0.2 && git push origin v1.0.2
 #
-# SECURITY: first-party actions (actions/*) are used and the release is created
-# with the built-in `gh` CLI (no third-party upload action). For maximum
-# supply-chain safety, pin these actions to commit SHAs and enable Dependabot.
+# Single Apple-Silicon (arm64) build for fast runner pickup. Intel (x64) and
+# Windows can be added back as a matrix once this is proven green.
+# SECURITY: first-party actions only + the built-in `gh` CLI (no third-party
+# upload action). For maximum supply-chain safety, pin these to commit SHAs.
 
 name: Release
 
@@ -24,27 +25,19 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14   # Apple Silicon
-            arch: arm64
-          - os: macos-13   # Intel
-            arch: x64
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest   # Apple Silicon (arm64)
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 20   # the app requires Node 20 to build native modules
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Build macOS app (${{ matrix.arch }})
-        run: npx electron-builder --mac --${{ matrix.arch }} --publish never
+      - name: Build macOS app (arm64)
+        run: npx electron-builder --mac --arm64 --publish never
 
       - name: Generate SHA-256 checksum
         working-directory: dist
@@ -54,7 +47,7 @@ jobs:
           cat "$DMG.sha256"
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v2
         with:
           subject-path: 'dist/*.dmg'
 
@@ -64,7 +57,6 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           DMG="$(ls dist/*.dmg)"
-          NOTES="Local-first Job Tracker. The app is unsigned — on first launch right-click the app and choose Open to pass Gatekeeper. Verify your download was built by this repo's CI (not tampered): run  gh attestation verify <file.dmg> --repo ${GITHUB_REPOSITORY}  or compare its SHA-256 to the attached .sha256 file."
-          # Create the release once; the second matrix leg no-ops via || true
+          NOTES="Local-first Job Tracker (Apple Silicon). The app is unsigned — on first launch right-click the app and choose Open to pass Gatekeeper. Verify your download was built by this repo's CI (not tampered): run  gh attestation verify <file.dmg> --repo ${GITHUB_REPOSITORY}  or compare its SHA-256 to the attached .sha256 file."
           gh release create "$TAG" --title "Job Tracker ${TAG}" --notes "$NOTES" --verify-tag || true
           gh release upload "$TAG" "$DMG" "$DMG.sha256" --clobber
