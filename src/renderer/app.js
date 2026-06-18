@@ -143,16 +143,33 @@ function groupByCompany(apps, sortBy = state.sortBy || 'date-desc') {
 function weekAgo() { const d = new Date(); d.setDate(d.getDate() - 7); return d; }
 
 // ─── AI calls ─────────────────────────────────────────────────────────────────
+// AI models often wrap JSON in prose or code fences even when told to return raw
+// JSON (newer models add a reasoning preamble). Pull the JSON array/object out of
+// whatever text comes back. Returns the parsed value, or null if none found.
+function extractJson(raw) {
+  if (!raw) return null;
+  const s = String(raw).replace(/```json|```/g, '').trim();
+  try { return JSON.parse(s); } catch (_) {}
+  const ai = s.indexOf('['), oi = s.indexOf('{');
+  if (ai === -1 && oi === -1) return null;
+  let start, close;
+  if (ai !== -1 && (oi === -1 || ai < oi)) { start = ai; close = ']'; }
+  else { start = oi; close = '}'; }
+  const end = s.lastIndexOf(close);
+  if (end <= start) return null;
+  try { return JSON.parse(s.slice(start, end + 1)); } catch (_) { return null; }
+}
+
 function getEndpoint() {
   if (state.provider === 'openai') return 'https://api.openai.com/v1/chat/completions';
-  if (state.provider === 'gemini') return `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${state.apiKey}`;
+  if (state.provider === 'gemini') return `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${state.apiKey}`;
   return 'https://api.anthropic.com/v1/messages';
 }
 
 function buildBody(sys, prompt, maxTok = 1000) {
   if (state.provider === 'openai') return { model: 'gpt-4o', max_tokens: maxTok, messages: [{ role: 'system', content: sys }, { role: 'user', content: prompt }] };
   if (state.provider === 'gemini') return { contents: [{ parts: [{ text: sys + '\n\n' + prompt }] }] };
-  return { model: 'claude-sonnet-4-20250514', max_tokens: maxTok, system: sys, messages: [{ role: 'user', content: prompt }] };
+  return { model: 'claude-sonnet-4-6', max_tokens: maxTok, system: sys, messages: [{ role: 'user', content: prompt }] };
 }
 
 function extractText(data) {
@@ -459,7 +476,7 @@ async function validateKey() {
       });
       valid = res.status !== 401 && res.status !== 403;
     } else if (state.provider === 'gemini') {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${k}`, {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${k}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents: [{ parts: [{ text: 'hi' }] }], generationConfig: { maxOutputTokens: 1 } })
@@ -890,7 +907,7 @@ RULES:
    - CORRELATE BY PERSON: if the invite's organizer/attendee name matches a recruiter discussing a SPECIFIC role in another email (e.g. Ashley Ciaburri about "Threat Investigations Manager"), this meeting belongs to THAT application — output ONE record using that company + role, with the meeting's date/time. Do NOT create a separate "(role not specified)" / "Meeting with [name]" record when it can be linked this way.
 8. DATE SEMANTICS — CRITICAL. The email's Date header is when the MESSAGE was sent, NOT a meeting date. Use it only for applied_date and updated_date. NEVER copy the email's received date into screening_date or interview_date. Those two fields hold ONLY an actual scheduled meeting date that is explicitly stated in the email (a calendar invite, or wording like "let's meet on Monday Jun 15"). If no specific meeting time is scheduled, leave screening_date AND interview_date null — even when status is "screening". Likewise interview_time / interview_datetime are null unless a real meeting time is given.
 
-Return ONLY a raw JSON array, no markdown, no prose:
+CRITICAL OUTPUT RULE: Respond with the JSON array ONLY. Your entire response must begin with "[" and end with "]". Do NOT write any analysis, reasoning, commentary, or summary before or after the JSON — output the array and nothing else:
 [{"id":"company_role_slug","company":"Company Name","role":"Exact Role Title","status":"applied|screening|interview|offer|rejected","applied_date":"YYYY-MM-DD or null","screening_date":"YYYY-MM-DD or null","interview_date":"YYYY-MM-DD or null","interview_time":"e.g. 7:30 AM PST or null","interview_datetime":"ISO-8601 with offset e.g. 2026-06-15T09:30:00-05:00, or null","offer_date":"YYYY-MM-DD or null","updated_date":"YYYY-MM-DD","notes":"one sentence"}]
 
 Today is ${today}. Dates come from the email Date header. Use null for unknown dates.`;
@@ -921,12 +938,9 @@ Today is ${today}. Dates come from the email Date header. Use null for unknown d
         continue;
       }
 
-      let batchFound = [];
-      try {
-        batchFound = JSON.parse(parsed.replace(/```json|```/g, '').trim());
-        if (!Array.isArray(batchFound)) batchFound = [];
-      } catch (e) {
-        console.error(`[scan] batch ${i / BATCH + 1} JSON parse failed:`, e.message, '\nRaw:', parsed);
+      const batchFound = extractJson(parsed);
+      if (!Array.isArray(batchFound)) {
+        console.error(`[scan] batch ${i / BATCH + 1} JSON parse failed.\nRaw:`, parsed);
         continue;
       }
 
@@ -1100,17 +1114,14 @@ For each skill, list the EXACT role titles (copied verbatim from the "ROLE TITLE
 
 Rank skills from most to least important for interviews (weight by how many roles need it, recency, and company repetition).
 
-Return ONLY a valid JSON array, no markdown, max 15 skills:
+Respond with the JSON array ONLY — begin with "[", end with "]", no prose before or after. Max 15 skills:
 [{"name":"Skill Name","tip":"one concrete interview tip for this skill","roles":["Exact Role Title", "Another Exact Role Title"]}]`,
       `Analyze these ${jdParts.length} job postings:\n\n${jdParts.join('\n\n')}`,
       1800
     );
 
-    let extracted = [];
-    try {
-      extracted = JSON.parse(raw.replace(/```json|```/g, '').trim());
-      if (!Array.isArray(extracted)) extracted = [];
-    } catch (_) {}
+    let extracted = extractJson(raw);
+    if (!Array.isArray(extracted)) extracted = [];
 
     // Map AI-returned roles back to canonical titles; drop anything not analyzed
     const cleanRoles = (arr) => {
@@ -1545,7 +1556,7 @@ async function extractSkills() {
   const jdText = ($('jd-paste')?.value || '').trim();
   const hasJD = jdText.length > 50;
 
-  const sysprompt = `You are a career coach. Extract the 7 most important required skills from the information below. Rank by importance. Return ONLY a valid JSON array, no markdown:
+  const sysprompt = `You are a career coach. Extract the 7 most important required skills from the information below. Rank by importance. Respond with the JSON array ONLY — begin with "[", end with "]", no prose before or after:
 [{"name":"skill name","tip":"one concrete prep tip specific to this role","roles":["${app.role}"]}]`;
 
   const userprompt = hasJD
@@ -1555,8 +1566,8 @@ async function extractSkills() {
   try {
     const txt = await callAI(sysprompt, userprompt);
 
-    let extracted = [];
-    try { extracted = JSON.parse(txt.replace(/```json|```/g, '').trim()); } catch (e) {}
+    let extracted = extractJson(txt);
+    if (!Array.isArray(extracted)) extracted = [];
 
     if (!extracted.length) throw new Error('Could not parse skills');
 
@@ -1659,7 +1670,7 @@ async function extractSkillsFromTab() {
     status.textContent = 'Using your pasted job description — extracting skills…';
   }
 
-  const sysprompt = `You are a career coach. Extract the 7 most important required skills from the information below. Rank by importance. Return ONLY a valid JSON array, no markdown:
+  const sysprompt = `You are a career coach. Extract the 7 most important required skills from the information below. Rank by importance. Respond with the JSON array ONLY — begin with "[", end with "]", no prose before or after:
 [{"name":"Skill Name","tip":"one sentence on how to demonstrate this skill in an interview"}]`;
 
   const userprompt = jdSource === 'ai-knowledge'
@@ -1668,8 +1679,8 @@ async function extractSkillsFromTab() {
 
   try {
     const raw = await callAI(sysprompt, userprompt, 800);
-    let extracted = [];
-    try { extracted = JSON.parse(raw.replace(/```json|```/g, '').trim()); } catch (e) {}
+    let extracted = extractJson(raw);
+    if (!Array.isArray(extracted)) extracted = [];
     if (!extracted.length) throw new Error('AI returned no skills — try again');
 
     for (const sk of extracted) {
@@ -1885,7 +1896,7 @@ Be OBJECTIVE and CRITICAL — this is the candidate's competitive edge, not a pe
 - Score honestly. A weak or poorly-aligned resume should get a low score (it's fine to score below 50). Reserve 80+ for resumes that are genuinely strong for these specific roles.
 - Be concrete and specific to THIS resume — quote or paraphrase real lines. No generic advice that could apply to any resume.
 
-Return ONLY a valid JSON object, no markdown:
+Respond with the JSON object ONLY — begin with "{", end with "}", no prose before or after:
 {
   "score": <integer 0-100 — overall fit for the target roles>,
   "summary": "1-2 sentences on overall alignment with the target roles",
@@ -1905,9 +1916,8 @@ ${resume.slice(0, 8000)}`;
 
   try {
     const raw = await callAI(sys, ctx, 2000);
-    let data;
-    try { data = JSON.parse(raw.replace(/```json|```/g, '').trim()); } catch (_) { data = null; }
-    if (!data || typeof data !== 'object') throw new Error('Could not parse the analysis — try again.');
+    const data = extractJson(raw);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Could not parse the analysis — try again.');
     await DB.setPref('resumeAnalysis', JSON.stringify(data));
     renderResumeResult(data);
     status.textContent = '✓ Analysis complete';
