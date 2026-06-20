@@ -393,6 +393,16 @@ ipcMain.handle('web:fetch-jd', async (_, company, role) => {
   });
 });
 
+// Refresh token expired/revoked (very common while the OAuth consent screen is
+// in Google "Testing" mode — refresh tokens there expire after 7 days). Clear the
+// stale tokens so the app prompts a clean reconnect.
+async function clearGmailAuth() {
+  try { await keytar.deletePassword('job-tracker', 'gmail-access-token'); } catch (_) {}
+  try { await keytar.deletePassword('job-tracker', 'gmail-refresh-token'); } catch (_) {}
+  try { store.delete('gmail.connected'); } catch (_) {}
+}
+const isAuthExpired = (msg) => /invalid_grant|invalid_token|invalid_rapt|expired or revoked|expired|revoked|unauthorized/i.test(String(msg || ''));
+
 // ─── IPC: Gmail API — fetch emails ───────────────────────────────────────────
 ipcMain.handle('gmail:search', async (_, query, maxResults = 50) => {
   const { clientId, clientSecret } = await getGoogleCredentials();
@@ -439,13 +449,22 @@ ipcMain.handle('gmail:search', async (_, query, maxResults = 50) => {
     );
     return { messages };
   } catch (e) {
-    // Try token refresh
+    // Expired/revoked token surfaced on the request itself → reconnect needed
+    if (isAuthExpired(e && e.message)) {
+      await clearGmailAuth();
+      return { error: 'reauth-required' };
+    }
+    // Otherwise the access token may just be stale — refresh once and ask to retry
     try {
       const { credentials } = await oauth2Client.refreshAccessToken();
       await keytar.setPassword('job-tracker', 'gmail-access-token', credentials.access_token);
       return { error: 'Token refreshed — please retry scan' };
-    } catch (_e2) {
-      return { error: e.message };
+    } catch (e2) {
+      if (isAuthExpired(e2 && e2.message)) {
+        await clearGmailAuth();
+        return { error: 'reauth-required' };
+      }
+      return { error: (e2 && e2.message) || (e && e.message) || 'gmail-error' };
     }
   }
 });

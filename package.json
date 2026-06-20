@@ -1,6 +1,6 @@
 {
   "name": "job-tracker",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "AI-powered job search tracker — auto-scans Gmail, tracks applications, preps skills",
   "author": "Joyce Feng",
   "license": "MIT",

@@ -838,8 +838,11 @@ async function scanGmail() {
           txt.textContent = 'Gmail not set up — go to Settings to add your Google credentials';
           dot.className = 'sdot dot-ok'; sp.classList.remove('on'); return;
         }
-        if (r.error === 'Not authenticated') {
-          txt.textContent = 'Gmail not connected — connect it using the banner above.';
+        if (r.error === 'Not authenticated' || r.error === 'reauth-required') {
+          txt.textContent = r.error === 'reauth-required'
+            ? 'Gmail sign-in expired — reconnect Gmail using the banner above. (Google expires access weekly while the app is in "Testing" mode.)'
+            : 'Gmail not connected — connect it using the banner above.';
+          await DB.setPref('gmailConnected', false);
           showReconnectBanner();
           dot.className = 'sdot dot-ok'; sp.classList.remove('on'); return;
         }
@@ -931,7 +934,7 @@ Today is ${today}. Dates come from the email Date header. Use null for unknown d
       let parsed = '';
       try {
         // ~160 tokens per record; give headroom for a batch of 10
-        parsed = await callAI(sysprompt, `Extract all job applications from these emails:\n\n${batch}`, 1800);
+        parsed = await callAI(sysprompt, `Extract all job applications from these emails:\n\n${batch}`, 2400);
         console.log(`[scan] batch ${i / BATCH + 1} response:`, parsed);
       } catch (e) {
         console.error(`[scan] batch ${i / BATCH + 1} AI call failed:`, e.message);
@@ -1103,21 +1106,23 @@ async function batchExtractSkills(apps, txt, dot, sp) {
 
   try {
     const raw = await callAI(
-      `You are a career coach extracting interview-prep skills from job postings.
+      `You are a career coach building a ranked interview-prep skill list for a candidate based on the roles they're applying to.
 
 Context about this candidate's job search:
 - ${titleCluster || 'Roles vary across the applications.'}
 - Company repetition signals high interest — weight those skills higher.
 - Recency signals: 🔴 very recent = highest priority, 🟡 recent = high priority, ⚪ older = lower priority.
 
-For each skill, list the EXACT role titles (copied verbatim from the "ROLE TITLE:" labels) that genuinely require it. Only use role titles that appear in the input — never invent one.
+Each entry below has a ROLE TITLE and, when available, job-description text. When it says "(no job description found — infer from role title)", use your OWN knowledge of what that role at that company typically requires — do not skip it.
 
-Rank skills from most to least important for interviews (weight by how many roles need it, recency, and company repetition).
+Produce the skills the candidate should prepare for interviews, ranked most-to-least important (weight by how many roles need each skill, recency, and company repetition). For each skill, list the EXACT role titles (copied verbatim from the ROLE TITLE labels) that need it — only titles that appear below.
 
-Respond with the JSON array ONLY — begin with "[", end with "]", no prose before or after. Max 15 skills:
+IMPORTANT: Always return between 8 and 15 skills. NEVER return an empty array — even with no job descriptions, infer concrete skills from the role titles and companies.
+
+Respond with the JSON array ONLY — begin with "[", end with "]", no prose before or after:
 [{"name":"Skill Name","tip":"one concrete interview tip for this skill","roles":["Exact Role Title", "Another Exact Role Title"]}]`,
-      `Analyze these ${jdParts.length} job postings:\n\n${jdParts.join('\n\n')}`,
-      1800
+      `These are the candidate's target roles (with any job-description text found):\n\n${jdParts.join('\n\n')}`,
+      3500
     );
 
     let extracted = extractJson(raw);
@@ -1168,6 +1173,7 @@ Respond with the JSON array ONLY — begin with "[", end with "]", no prose befo
       if (isElectron) await DB.setPref('lastSkillScanTime', new Date().toISOString());
       renderSkills();
     } else {
+      console.error('[skills] ranking returned empty/unparseable. Raw was:', raw);
       txt.textContent = 'Scan complete — skill extraction returned empty (try Skills tab manually)';
     }
   } catch (e) {
@@ -1458,6 +1464,16 @@ async function renderLastScan() {
 
 function updateWeekStats() { renderStats(); }  // alias kept for existing call sites
 
+// Normalize a company name for dedup: lowercase, drop parenthetical vendor tags
+// like "Google (xWF)", strip punctuation. So "Google" and "Google (xWF)" match.
+function normCompany(c) {
+  return String(c || '').toLowerCase().replace(/\([^)]*\)/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+// The date that represents an app's scheduled event (interview > screening > final).
+function eventDateOf(a) {
+  return a.interview_date || a.interviewDate || a.screening_date || a.screeningDate || a.final_date || a.finalDate || null;
+}
+
 function renderStats() {
   const cutoff = state.startDate ? new Date(state.startDate) : new Date(0);
   const apps = state.apps.filter(a => {
@@ -1466,7 +1482,12 @@ function renderStats() {
   });
 
   const total = apps.length;
-  const interviews = apps.filter(a => ['interview', 'offer'].includes(a.status)).length;
+  // Count interviews deduped by company + date — fragmented records for the same
+  // company on the same day (e.g. several Google emails) count as one interview.
+  const interviews = new Set(
+    apps.filter(a => ['interview', 'offer'].includes(a.status))
+        .map(a => normCompany(a.company) + '|' + (eventDateOf(a) || a.id))
+  ).size;
   const offers = apps.filter(a => a.status === 'offer').length;
   const rejected = apps.filter(a => a.status === 'rejected').length;
   const responded = apps.filter(a => ['screening', 'interview', 'offer', 'rejected'].includes(a.status)).length;
@@ -2020,16 +2041,27 @@ function renderReminders() {
 
   const upcoming = state.apps
     .map(a => ({ app: a, evt: nextEvent(a) }))
-    .filter(x => x.evt)
-    .sort((a, b) => new Date(a.evt.date) - new Date(b.evt.date));
+    .filter(x => x.evt);
 
-  if (!upcoming.length) {
+  // Dedup fragmented records: same company + same calendar date = one event.
+  // Keep the richest record (precise time > locked > a real role title).
+  const score = ({ app }) => (app.interview_datetime ? 4 : 0) + (app.event_locked ? 2 : 0) +
+    (app.role && !/role not specified/i.test(app.role) ? 1 : 0);
+  const byKey = new Map();
+  for (const item of upcoming) {
+    const key = normCompany(item.app.company) + '|' + String(item.evt.date || '').slice(0, 10);
+    const cur = byKey.get(key);
+    if (!cur || score(item) > score(cur)) byKey.set(key, item);
+  }
+  const deduped = [...byKey.values()].sort((a, b) => new Date(a.evt.date) - new Date(b.evt.date));
+
+  if (!deduped.length) {
     list.innerHTML = '<div class="empty">No upcoming interviews or calls detected.<br>Scan Gmail, or use + Add to enter a company, role, date and time.</div>';
     return;
   }
 
   list.innerHTML = '';
-  upcoming.forEach(({ app, evt }) => {
+  deduped.forEach(({ app, evt }) => {
     const when = formatEventWhen(app, evt);
     const roleSkills = state.skills.filter(s => (app.skills || []).includes(s.name) || s.roles.includes(app.role));
     const div = document.createElement('div');
